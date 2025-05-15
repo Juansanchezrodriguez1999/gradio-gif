@@ -4,9 +4,11 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gdal-bin \
+    libgl1 libglib2.0-0\
     libgdal-dev \
     git \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 
 ENV GDAL_DATA=/usr/share/gdal
 

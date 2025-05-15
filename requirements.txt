@@ -15,3 +15,5 @@ folium==0.18.0
 plotly==5.18.0
 gradio_calendar==0.0.6
 matplotlib==3.8.1
+imageio==2.35.1
+opencv-python==4.11.0.86

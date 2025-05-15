@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 from datetime import datetime
 from typing import List, Tuple
-from PIL import Image
+import imageio
 
 import folium
 import geopandas as gpd
@@ -21,8 +21,11 @@ from sigpac_tools.find import find_from_cadastral_registry
 
 from app.cut_from_geometry import cut_from_geometry
 from app.download_merge import download_tif_files
+from app.download_merge_rgb import workflow_generar_gif, descargar_archivos_tif,rgb,crear_gif,merge_tifs_por_fecha_banda
 from app.generate_map import generate_map_from_geojson
-from app.generate_map import create_gif
+from app.generate_map import crear_gif_no_rgb
+from app.generate_map import merge_tifs_por_fecha
+
 from app.get_tiles import get_tiles_polygons
 from app.plots import all_statistics, plot_statistics, temporal_means
 from app.sigpac_to_geometry import sigpac_to_geometry
@@ -37,9 +40,7 @@ initial_map = folium.Map(
 )
 
 
-def process_catastral_data(
-    catastral_registry: int, images: List[str]
-) -> Tuple[str, str]:
+def process_catastral_data(    catastral_registry: int, images: List[str]) -> Tuple[str, str]:
     """
     Processes images by cutting them according to SIGPAC geometry and returns a ZIP file with cropped images and geometry in GeoJSON format.
 
@@ -189,8 +190,7 @@ def process_catastral_data(
 
 
 def process_catastral_data_sentinel(
-    catastral_registry: int, indexes: list, date_start: str, date_end: str
-) -> str:
+    catastral_registry: int, indexes: list, date_start: str, date_end: str) -> str:
     """
     Processes images by cutting them according to SIGPAC geometry and returns a ZIP file with cropped images and geometry in GeoJSON format.
 
@@ -235,12 +235,16 @@ def process_catastral_data_sentinel(
 
     zones_utm = get_tiles_polygons(gdf)
     list_zones_utm = list(zones_utm)
-    images_dir = download_tif_files(list_zones_utm, years, indexes, months)
+    if(indexes==["RGB"]):
+        images_dir = descargar_archivos_tif(list_zones_utm, years, months)
+    else:
+        images_dir = download_tif_files(list_zones_utm, years, indexes, months)
+
     if not images_dir:
         gr.Warning("No hay imagenes disponibles para la fecha seleccionada, las imágenes son procesadas a final de cada mes.")
         gr.Warning("No images are available for the selected date, images are processed at the end of each month.")
+        return None, None
 
-        return None, None, None
     unique_formats = list(
             set(
                 f.split(".")[-1].lower()
@@ -255,16 +259,17 @@ def process_catastral_data_sentinel(
     cropped_images = []
     for feature in geojson_data["features"]:
         geometry = feature["geometry"]
-        geometry_id = feature["objectID"]
+        geometry_id = catastral_registry
         cropped_images.extend(cut_from_geometry(geometry, unique_formats[0], images_dir, geometry_id))
+    
+    if(indexes==["RGB"]):
+        rgb_folder, rutas_png, images_dir_rgb, output_gif = rgb(cropped_images)
+    else:
+        output_gif = crear_gif_no_rgb(cropped_images)
+    
+    main_map = generate_map_from_geojson(geojson_data, cropped_images, output_gif, indexes)
 
-    data_nose = create_gif(cropped_images)
-
-    print(data_nose)
-
-    main_map = generate_map_from_geojson(geojson_data, cropped_images)
-
-    return main_map._repr_html_()
+    return output_gif,main_map._repr_html_()
 
 
 def process_geojson_data(geojson: str, images: List[str]) -> str:
@@ -403,8 +408,7 @@ def process_geojson_data(geojson: str, images: List[str]) -> str:
 
 
 def process_geojson_data_sentinel(
-    geojson: dict, indexes: list, date_start: str, date_end: str
-) -> str:
+    geojson: dict, indexes: list, date_start: str, date_end: str) -> str:
     """
     Processes images based on GeoJSON and returns a ZIP file with cropped images.
 
@@ -417,6 +421,8 @@ def process_geojson_data_sentinel(
     Returns:
         str: Path to the ZIP file with cropped images.
     """
+    
+    # Procesamiento de las fechas
     year_start = date_start.strftime("%Y")
     month_start = date_start.strftime("%B")
     year_end = date_end.strftime("%Y")
@@ -424,133 +430,66 @@ def process_geojson_data_sentinel(
     years = [year_start, year_end]
     months = [month_start, month_end]
     indexes = [indexes.upper()]
+    
+
     total_html_files = []
     total_geojson_files = []
     combined_df = pd.DataFrame()
     temporal_df = pd.DataFrame()
     indexes = [x.upper() for x in indexes]
+
     gdf = gpd.read_file(geojson)
     json_path = os.path.join(tempfile.gettempdir(), "temp_shapefile.json")
     gdf.to_file(json_path, driver="GeoJSON")
+    
+
     with open(json_path) as f:
         geojson_data = json.load(f)
+
     zones_utm = get_tiles_polygons(gdf)
     list_zones_utm = list(zones_utm)
-    images_dir = download_tif_files(list_zones_utm, years, indexes, months)
-    
+    if(indexes==["RGB"]):
+        images_dir = descargar_archivos_tif(list_zones_utm, years, months)
+    else:
+        images_dir = download_tif_files(list_zones_utm, years, indexes, months)
+
     if not images_dir:
         gr.Warning("No hay imagenes disponibles para la fecha seleccionada, las imágenes son procesadas a final de cada mes.")
         gr.Warning("No images are available for the selected date, images are processed at the end of each month.")
+        return None, None
 
-        return None, None, None
-    geometry = geojson_data["features"][0]["geometry"]
     unique_formats = list(
-        set(f.split(".")[-1].lower() for f in images_dir if isinstance(f, str) and "." in f)
-    )
-    for indice in indexes:
-        stats_index = {}
-        stats = []
-
-        for feature in geojson_data["features"]:
-            geometry = feature["geometry"]
-            polygon_id = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
-            feature["objectID"] = polygon_id
-            stats.append(
-                calculate_statistics_in_polygon(
-                    geometry, images_dir, polygon_id, indice
-                )
+            set(
+                f.split(".")[-1].lower()
+                for f in images_dir
+                if isinstance(f, str) and "." in f
             )
-
-        stats_index[indice] = stats
-
-        for key, polygons in stats_index.items():
-            records = []
-            for polygon in polygons:
-                for polygon_id, metrics in polygon.items():
-                    record = {"polygon_id": polygon_id, "indice": key}
-                    record.update(metrics)
-                    records.append(record)
-
-            df = pd.DataFrame(records)
-            df_result, csv_path, monthly_means = all_statistics(df, indice)
-            combined_df = pd.concat([combined_df, df_result], ignore_index=True)
-
-        temporal_df = temporal_means(combined_df[combined_df["indice"] == indice])
-        temporal_df["indice"] = indice
-        temporal_dict = (
-            temporal_df.groupby("polygon_id")
-            .apply(
-                lambda x: {
-                    f"{row['mes']}/{row['años']}".replace(" ", ""): {
-                        "median": row["media_mediana"],
-                        "mean": row["media_media"],
-                        "std": row["media_desviacion"],
-                    }
-                    for _, row in x.iterrows()
-                }
-            )
-            .to_dict()
         )
-
-        convinced_dict = (
-            combined_df[combined_df["indice"] == indice]
-            .groupby("polygon_id")
-            .apply(
-                lambda x: {
-                    f"{row['mes']}-{row['anio']}".replace(" ", ""): {
-                        "median": row["mediana"],
-                        "mean": row["media"],
-                        "std": row["desviacion"],
-                    }
-                    for _, row in x.iterrows()
-                }
-            )
-            .to_dict()
+    if len(unique_formats) > 1:
+        raise ValueError(
+            f"Unsupported format. You must upload images in one unique format."
         )
-
-        for feature in geojson_data["features"]:
-            if feature["objectID"] in temporal_dict:
-                feature["temporalStatistics"] = temporal_dict[feature["objectID"]]
-            if feature["objectID"] in convinced_dict:
-                feature["zonalStatistics"] = convinced_dict[feature["objectID"]]
-
-        updated_file_name = f"Geojson_{indice}.geojson"
-        with open(updated_file_name, "w") as file:
-            json.dump(geojson_data, file, indent=4)
-        total_geojson_files.append(updated_file_name)
-
-    unique_polygons = combined_df["polygon_id"].unique()
-    for polygon in unique_polygons:
-        df_polygon = combined_df[combined_df["polygon_id"] == polygon].drop(
-            columns=["polygon_id"]
-        )
-        total_html_files.extend(
-            plot_statistics(df_polygon, ["zonal", "temporal"], polygon)
-        )
-
-    zip_output_geojson = os.path.join(tempfile.mkdtemp(), "Geojson.zip")
-    with zipfile.ZipFile(zip_output_geojson, "w") as zipf:
-        for geojson_file in total_geojson_files:
-            zipf.write(geojson_file, os.path.basename(geojson_file))
-
-    zip_output_plots = os.path.join(tempfile.mkdtemp(), "Plots.zip")
-    with zipfile.ZipFile(zip_output_plots, "w") as zipf:
-        for html_file in total_html_files:
-            zipf.write(html_file, os.path.basename(html_file))
-
     cropped_images = []
     for feature in geojson_data["features"]:
         geometry = feature["geometry"]
+        polygon_id = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
+        feature["objectID"] = polygon_id
         geometry_id = feature["objectID"]
         cropped_images.extend(cut_from_geometry(geometry, unique_formats[0], images_dir, geometry_id))
-    main_map = generate_map_from_geojson(geojson_data, cropped_images)
+    
+    if(indexes==["RGB"]):
+        cropped_images_merge=merge_tifs_por_fecha_banda(cropped_images)
+        rgb_folder, rutas_png, images_dir_rgb, output_gif = rgb(cropped_images_merge)
+    else:
+        cropped_images_merge=merge_tifs_por_fecha(cropped_images)
+        output_gif = crear_gif_no_rgb(cropped_images_merge)
+    
+    main_map = generate_map_from_geojson(geojson_data, cropped_images_merge, output_gif, indexes)
 
-    return zip_output_plots, zip_output_geojson, main_map._repr_html_()
+    return output_gif,main_map._repr_html_()
 
 
-def add_stats_to_dbf(
-    dbf_path: str, stats: list, indice: str, output_dir: str
-) -> Tuple[str, str]:
+def add_stats_to_dbf(    dbf_path: str, stats: list, indice: str, output_dir: str) -> Tuple[str, str]:
     indice_dir = os.path.join(output_dir, indice)
     os.makedirs(indice_dir, exist_ok=True)
 
@@ -739,9 +678,7 @@ def process_shp_data(shp: str, images: List[str]) -> str:
         raise Exception(f"An error occurred: {str(e)}")
 
 
-def process_shp_data_sentinel(
-    shp: str, indexes: list, date_start: str, date_end: str
-) -> str:
+def process_shp_data_sentinel(    shp: str, indexes: list, date_start: str, date_end: str) -> str:
     """
     Processes images by cutting them according to the provided shapefile geometry and returns a ZIP file with cropped images.
 
@@ -790,118 +727,46 @@ def process_shp_data_sentinel(
         geojson_data = json.load(f)
     zones_utm = get_tiles_polygons(gdf)
     list_zones_utm = list(zones_utm)
-    images_dir = download_tif_files(list_zones_utm, years, indexes, months)
+    if(indexes==["RGB"]):
+        images_dir = descargar_archivos_tif(list_zones_utm, years, months)
+    else:
+        images_dir = download_tif_files(list_zones_utm, years, indexes, months)
+
     if not images_dir:
         gr.Warning("No hay imagenes disponibles para la fecha seleccionada, las imágenes son procesadas a final de cada mes.")
         gr.Warning("No images are available for the selected date, images are processed at the end of each month.")
+        return None, None
 
-        return None, None, None
     unique_formats = list(
-        set(f.split(".")[-1].lower() for f in images_dir if isinstance(f, str) and "." in f)
-    )
+            set(
+                f.split(".")[-1].lower()
+                for f in images_dir
+                if isinstance(f, str) and "." in f
+            )
+        )
     if len(unique_formats) > 1:
         raise ValueError(
             f"Unsupported format. You must upload images in one unique format."
         )
-
-    for indice in indexes:
-        stats = []
-        for feature in geojson_data["features"]:
-            geometry = feature["geometry"]
-            polygon_id = feature["properties"][first_column_name]
-            stats.append(
-                calculate_statistics_in_polygon(
-                    geometry, images_dir, polygon_id, indice
-                )
-            )
-        indice_dir = os.path.join(extract_path, indice)
-        os.makedirs(indice_dir, exist_ok=True)
-        updated_dbf_path, csv_path = add_stats_to_dbf(
-            dbf_file, stats, indice, extract_path
-        )
-
-    for index_folder in os.listdir(extract_path):
-        folder_path = os.path.join(extract_path, index_folder)
-        updated_folder_path = os.path.join(updated_shapefiles_path, index_folder)
-        os.makedirs(updated_folder_path, exist_ok=True)
-
-        if os.path.isdir(folder_path):
-            dbf_files = [
-                file for file in os.listdir(folder_path) if file.endswith(".dbf")
-            ]
-            if dbf_files:
-                dbf_path = os.path.join(folder_path, dbf_files[0])
-                dbf_df = gpd.read_file(dbf_path)
-                df_result, csv_path, monthly_means = all_statistics(
-                    dbf_df, index_folder
-                )
-                combined_df = pd.concat([combined_df, df_result], ignore_index=True)
-                temporal_df = temporal_means(combined_df)
-
-                for _, row in temporal_df.iterrows():
-                    mean_col = f"{row['mes']}{row['años'].replace('-', '').replace(' ', '')}mean"
-                    median_col = f"{row['mes']}{row['años'].replace('-', '').replace(' ', '')}medi"
-                    std_col = f"{row['mes']}{row['años'].replace('-', '').replace(' ', '')}std"
-
-                    if mean_col not in dbf_df.columns:
-                        dbf_df[mean_col] = None
-                    if std_col not in dbf_df.columns:
-                        dbf_df[std_col] = None
-
-                    dbf_df.loc[
-                        dbf_df[first_column_name] == row["polygon_id"], median_col
-                    ] = row["media_mediana"]
-                    dbf_df.loc[
-                        dbf_df[first_column_name] == row["polygon_id"], mean_col
-                    ] = row["media_media"]
-                    dbf_df.loc[
-                        dbf_df[first_column_name] == row["polygon_id"], std_col
-                    ] = row["media_desviacion"]
-
-                dbf_df.to_file(updated_dbf_path, driver="ESRI Shapefile")
-
-                for file in os.listdir(folder_path):
-                    if file.endswith((".shp", ".shx", ".prj", ".cpg")):
-                        shutil.copy(
-                            os.path.join(folder_path, file), updated_folder_path
-                        )
-
-    unique_polygons = combined_df["polygon_id"].unique()
-    for polygon in unique_polygons:
-        df_polygon = combined_df[combined_df["polygon_id"] == polygon].drop(
-            columns=["polygon_id"]
-        )
-        total_html_files.extend(
-            plot_statistics(df_polygon, ["zonal", "temporal"], polygon)
-        )
-    zip_output_plots = os.path.join(tempfile.mkdtemp(), "Plots.zip")
-    with zipfile.ZipFile(zip_output_plots, "w") as zipf:
-        for html_file in total_html_files:
-            zipf.write(html_file, os.path.basename(html_file))
-    with zipfile.ZipFile(output_zip_path, "w") as zipf:
-        for indice in indexes:
-            indice_dir = os.path.join(extract_path, indice)
-            for folder_name, _, filenames in os.walk(indice_dir):
-                for filename in filenames:
-
-                    file_path = os.path.join(folder_name, filename)
-                    zipf.write(file_path, os.path.relpath(file_path, extract_path))
-
     cropped_images = []
     for feature in geojson_data["features"]:
         geometry = feature["geometry"]
-        geometry_id = feature["objectID"]
+        geometry_id = feature["properties"][first_column_name]
         cropped_images.extend(cut_from_geometry(geometry, unique_formats[0], images_dir, geometry_id))
-    main_map = generate_map_from_geojson(geojson_data, cropped_images)
+    
+    if(indexes==["RGB"]):
+        cropped_images_merge=merge_tifs_por_fecha_banda(cropped_images)
+        rgb_folder, rutas_png, images_dir_rgb, output_gif = rgb(cropped_images_merge)
+    else:
+        cropped_images_merge=merge_tifs_por_fecha(cropped_images)
+        output_gif = crear_gif_no_rgb(cropped_images_merge)
+    
+    main_map = generate_map_from_geojson(geojson_data, cropped_images_merge, output_gif, indexes)
 
-    shutil.rmtree(extract_path)
-    os.remove(json_path)
-    return zip_output_plots, output_zip_path, main_map._repr_html_()
+    return output_gif,main_map._repr_html_()
 
 
-def process_csv_data(
-    csv: str, images: List[str], latitude_column: str, longitude_column: str
-) -> str:
+def process_csv_data(csv: str, images: List[str], latitude_column: str, longitude_column: str) -> str:
     """
     Processes images by cutting them according to the provided shapefile geometry and returns a ZIP file with cropped images.
 
@@ -1063,8 +928,7 @@ def process_csv_data_sentinel(
     date_start: str,
     date_end: str,
     latitude_column: str,
-    longitude_column: str,
-) -> str:
+    longitude_column: str,) -> str:
     """
     Processes images by cutting them according to the provided shapefile geometry and returns a ZIP file with cropped images.
 
@@ -1132,120 +996,41 @@ def process_csv_data_sentinel(
 
     zones_utm = get_tiles_polygons(gdf)
     list_zones_utm = list(zones_utm)
-    images_dir = download_tif_files(list_zones_utm, years, indexes, months)
+    if(indexes==["RGB"]):
+        images_dir = descargar_archivos_tif(list_zones_utm, years, months)
+    else:
+        images_dir = download_tif_files(list_zones_utm, years, indexes, months)
+
     if not images_dir:
         gr.Warning("No hay imagenes disponibles para la fecha seleccionada, las imágenes son procesadas a final de cada mes.")
         gr.Warning("No images are available for the selected date, images are processed at the end of each month.")
+        return None, None
 
-        return None, None, None
-    geometry = geojson_data["features"][0]["geometry"]
     unique_formats = list(
-        set(f.split(".")[-1].lower() for f in images_dir if isinstance(f, str) and "." in f)
-    )
+            set(
+                f.split(".")[-1].lower()
+                for f in images_dir
+                if isinstance(f, str) and "." in f
+            )
+        )
     if len(unique_formats) > 1:
         raise ValueError(
             f"Unsupported format. You must upload images in one unique format."
         )
-
-    for indice in indexes:
-        stats_index = {}
-        stats = []
-
-        for feature in geojson_data["features"]:
-            geometry = feature["geometry"]
-            polygon_id = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
-            feature["objectID"] = polygon_id
-            stats.append(
-                calculate_statistics_in_polygon(
-                    geometry, images_dir, polygon_id, indice
-                )
-            )
-
-        stats_index[indice] = stats
-
-        for key, polygons in stats_index.items():
-            records = []
-            for polygon in polygons:
-                for polygon_id, metrics in polygon.items():
-                    record = {"polygon_id": polygon_id, "indice": key}
-                    record.update(metrics)
-                    records.append(record)
-
-            df = pd.DataFrame(records)
-            df_result, csv_path, monthly_means = all_statistics(df, indice)
-            combined_df = pd.concat([combined_df, df_result], ignore_index=True)
-
-        temporal_df = temporal_means(combined_df[combined_df["indice"] == indice])
-        temporal_df["indice"] = indice
-        temporal_dict = (
-            temporal_df.groupby("polygon_id")
-            .apply(
-                lambda x: {
-                    f"{row['mes']}/{row['años']}".replace(" ", ""): {
-                        "median": row["media_mediana"],
-                        "mean": row["media_media"],
-                        "std": row["media_desviacion"],
-                    }
-                    for _, row in x.iterrows()
-                }
-            )
-            .to_dict()
-        )
-
-        convinced_dict = (
-            combined_df[combined_df["indice"] == indice]
-            .groupby("polygon_id")
-            .apply(
-                lambda x: {
-                    f"{row['mes']}-{row['anio']}".replace(" ", ""): {
-                        "median": row["mediana"],
-                        "mean": row["media"],
-                        "std": row["desviacion"],
-                    }
-                    for _, row in x.iterrows()
-                }
-            )
-            .to_dict()
-        )
-
-        for feature in geojson_data["features"]:
-            if feature["objectID"] in temporal_dict:
-                feature["temporalStatistics"] = temporal_dict[feature["objectID"]]
-            if feature["objectID"] in convinced_dict:
-                feature["zonalStatistics"] = convinced_dict[feature["objectID"]]
-
-        updated_file_name = f"Geojson_{indice}.geojson"
-        with open(updated_file_name, "w") as file:
-            json.dump(geojson_data, file, indent=4)
-        total_geojson_files.append(updated_file_name)
-
-    unique_polygons = combined_df["polygon_id"].unique()
-    for polygon in unique_polygons:
-        df_polygon = combined_df[combined_df["polygon_id"] == polygon].drop(
-            columns=["polygon_id"]
-        )
-        total_html_files.extend(
-            plot_statistics(df_polygon, ["zonal", "temporal"], polygon)
-        )
-
-    zip_output_geojson = os.path.join(tempfile.mkdtemp(), "Geojson.zip")
-    with zipfile.ZipFile(zip_output_geojson, "w") as zipf:
-        for geojson_file in total_geojson_files:
-            zipf.write(geojson_file, os.path.basename(geojson_file))
-
-    zip_output_plots = os.path.join(tempfile.mkdtemp(), "Plots.zip")
-    with zipfile.ZipFile(zip_output_plots, "w") as zipf:
-        for html_file in total_html_files:
-            zipf.write(html_file, os.path.basename(html_file))
     cropped_images = []
     for feature in geojson_data["features"]:
         geometry = feature["geometry"]
-        geometry_id = feature["objectID"]
+        geometry_id = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
         cropped_images.extend(cut_from_geometry(geometry, unique_formats[0], images_dir, geometry_id))
-    main_map = generate_map_from_geojson(geojson_data, cropped_images)
+    
+    if(indexes==["RGB"]):
+        rgb_folder, rutas_png, images_dir_rgb, output_gif = rgb(cropped_images)
+    else:
+        output_gif = crear_gif_no_rgb(cropped_images)
+    
+    main_map = generate_map_from_geojson(geojson_data, cropped_images, output_gif, indexes)
 
-
-    return zip_output_plots, zip_output_geojson, main_map._repr_html_()
+    return output_gif,main_map._repr_html_()
 
 def cambiar_idioma(lang):
     if lang=="Español":
@@ -1262,19 +1047,13 @@ def build_interface() -> gr.Blocks:
         gr.Blocks: The complete Gradio interface with tabs.
     """
     df = pd.read_csv("multilenguaje.csv",index_col="indice")
-    with gr.Blocks(theme="soft", title="Estrés hídrico") as interface:
-                # Estado con el idioma inicial
+    with gr.Blocks(theme="soft", title="Creador de GIFs") as interface:
         language_request= gr.State()     
-        
-        # Estado con el idioma seleccionado en el radio
         language= gr.State()
         
         @interface.load(outputs=[language_request,language])
         def cargar_idioma(request:gr.Request):
-            if request.headers["Accept-Language"].split(",")[0].lower().startswith("es"):
-                return "Español","es"
-            else:
-                return "English","en"
+            return "Español","es"
 
         @gr.render(inputs=language_request)
         def selector_idioma(lang):
@@ -1290,190 +1069,6 @@ def build_interface() -> gr.Blocks:
                          {df.loc['desc_general_fuente', idioma]}
                         """
             )
-            with gr.Tab(label=df.loc['propias', idioma]):
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown(f"""
-                        {df.loc['detalles_inputs', idioma]}               
-                        - {df.loc['imagenes_desc', idioma]}
-                        - {df.loc['tipo_geometria_desc', idioma]}
-                        - {df.loc['archivo_geometria_desc', idioma]}
-                            - {df.loc['si_csv_desc', idioma]}:
-                                {df.loc['csv_requisitos', idioma]}
-                                ```csv
-                                X,Y
-                                37.66314226,-5.302012025
-                                37.66634019,-5.22130994
-                                37.72700059,-5.246265025
-                                37.72265957,-5.334305567
-                                ```  
-                        - {df.loc['columna_latitud_desc', idioma]}
-                        - {df.loc['columna_longitud_desc', idioma]}
-                        - {df.loc['registro_catastral_desc', idioma]}
-                        {df.loc['detalles_outputs', idioma]}
-                        - {df.loc['graficos_desc', idioma]}
-                        - {df.loc['geometria_desc', idioma]}
-                        - {df.loc['mapa_desc', idioma]}
-                        """)
-                    
-
-
-                    with gr.Column():
-                        imagenes = gr.File(
-                            label=df.loc['subir_imagenes', idioma], file_count="multiple", type="filepath"
-                        )
-                        input_file_type = gr.Radio(
-                            label=df.loc['seleccionar_geometria', idioma],
-                            choices=["Shapefile", "CSV", "Geojson", "Catastral"]
-                        )
-                        geometry_file = gr.File(
-                            label=df.loc['subir_archivo', idioma], visible=True
-                        )
-                        latitude_column = gr.Text(
-                            label=df.loc['latitud', idioma], value="X", visible=False
-                        )
-                        longitude_column = gr.Text(
-                            label=df.loc['longitud', idioma], value="Y", visible=False
-                        )
-                        catastral_registry = gr.Text(
-                            label=df.loc['registro_catastral', idioma], value="XXX0000000000X", visible=False
-                        )
-
-                with gr.Row():
-                    submit_button = gr.Button(value=df.loc['procesar', idioma])
-                    clear_button = gr.Button(value=df.loc['limpiar', idioma])
-                with gr.Row():
-                    output_plots = gr.File(label=df.loc['descargar_graficas', idioma])
-                    output_geometry = gr.File(label=df.loc['descargar_geometria', idioma])
-                map_view = gr.HTML(
-                    label=df.loc['mapa', idioma],
-                    elem_id="output-map",
-                    value=initial_map._repr_html_(),
-                    visible=True,
-                )
-
-                def clear_inputs():
-                    """
-                    Resetea todos los campos del formulario a sus valores iniciales.
-                    """
-                    return (
-                        gr.update(value=None),
-                        gr.update(value=None),
-                        gr.update(value=None),
-                        gr.update(value=""),
-                        gr.update(value=""),
-                        gr.update(value=""),
-                        gr.update(value=None),
-                    )
-
-                clear_button.click(
-                    fn=clear_inputs,
-                    inputs=[],
-                    outputs=[
-                        imagenes,
-                        input_file_type,
-                        geometry_file,
-                        latitude_column,
-                        longitude_column,
-                        catastral_registry,
-                    ],
-                )
-
-                def update_visibility(file_type):
-                    if file_type == "Catastral":
-                        return (
-                            gr.update(visible=False),
-                            gr.update(visible=True),
-                            gr.update(visible=False),
-                            gr.update(visible=False),
-                        )
-                    elif file_type == "CSV":
-                        return (
-                            gr.update(visible=True),
-                            gr.update(visible=False),
-                            gr.update(visible=True),
-                            gr.update(visible=True),
-                        )
-                    else:
-                        return (
-                            gr.update(visible=True),
-                            gr.update(visible=False),
-                            gr.update(visible=False),
-                            gr.update(visible=False),
-                        )
-
-                def process_inputs(
-                    imagenes,
-                    input_file_type,
-                    geometry_file,
-                    catastral_registry,
-                    latitude_column,
-                    longitude_column,
-                ):
-                    if not imagenes:
-                        gr.Warning(df.loc['subir_imagenes_war', idioma])
-                        return None, None, None
-                    
-                    if not input_file_type:
-                        gr.Warning(df.loc['seleccionar_geometria_war', idioma])
-                        return None, None, None
-                    
-                    if input_file_type in ["Shapefile", "CSV", "Geojson"] and not geometry_file:
-                        gr.Warning(df.loc['archivo_geometria_war', idioma])
-                        return None, None, None
-                    
-                    if input_file_type in ["CSV"] and ((not latitude_column or not longitude_column) or (latitude_column=="" or longitude_column =="")) :
-                        gr.Warning(df.loc['nombres_latlon_war', idioma])
-                        return None, None, None
-                    
-                    if input_file_type == "Catastral" and (not catastral_registry or catastral_registry=="XXX0000000000X" or catastral_registry==""):
-                        gr.Warning(df.loc['insertar_catastro_war', idioma])
-                        return None, None, None
-
-                    if not indexes:
-                        gr.Warning(df.loc['seleccionar_indice_war', idioma])
-                        return None, None, None
-
-                    if not selected_date_start or not selected_date_end:
-                        gr.Warning(df.loc['seleccionar_fechas_war', idioma])
-                        return None, None, None
-
-                    if input_file_type == "Catastral":
-                        return process_catastral_data(catastral_registry, imagenes)
-                    elif input_file_type == "Shapefile":
-                        return process_shp_data(geometry_file, imagenes)
-                    elif input_file_type == "CSV":
-                        return process_csv_data(
-                            geometry_file, imagenes, latitude_column, longitude_column
-                        )
-                    else:
-                        return process_geojson_data(geometry_file, imagenes)
-
-                input_file_type.change(
-                    fn=update_visibility,
-                    inputs=[input_file_type],
-                    outputs=[
-                        geometry_file,
-                        catastral_registry,
-                        latitude_column,
-                        longitude_column,
-                    ],
-                )
-
-                submit_button.click(
-                    fn=process_inputs,
-                    inputs=[
-                        imagenes,
-                        input_file_type,
-                        geometry_file,
-                        catastral_registry,
-                        latitude_column,
-                        longitude_column,
-                    ],
-                    outputs=[output_plots, output_geometry, map_view],
-                )
-
-
             with gr.Tab(label=df.loc['archivo', idioma]):
                 with gr.Row():
                     with gr.Column():
@@ -1496,8 +1091,7 @@ def build_interface() -> gr.Blocks:
                         - {df.loc['registro_catastral_desc', idioma]}
                         - {df.loc['fecha_desc', idioma]}
                         {df.loc['detalles_outputs', idioma]}
-                        - {df.loc['graficos_desc', idioma]}
-                        - {df.loc['geometria_desc', idioma]}
+                        - {df.loc['gif_output', idioma]}
                         - {df.loc['mapa_desc', idioma]}
                         """)
                     
@@ -1505,8 +1099,9 @@ def build_interface() -> gr.Blocks:
                         indexes = gr.Radio(
                             label=df.loc['seleccionar_indice', idioma],
                             choices=[
-                                "moisture", "ndvi", "ndwi", "ndsi", "evi", "osavi", "evi2", "ndre", "ndyi", "mndwi", "bri", "ri", "bsi", "cril"
-                            ]
+                                "RGB","moisture", "ndvi", "ndwi", "ndsi", "evi", "osavi", "evi2", "ndre", "ndyi", "mndwi", "bri", "ri", "bsi", "cril"
+                            ],
+                            value="RGB"
                         )
                         input_file_type = gr.Radio(
                             label=df.loc['seleccionar_geometria', idioma],
@@ -1536,8 +1131,7 @@ def build_interface() -> gr.Blocks:
                     submit_button = gr.Button(value=df.loc['procesar', idioma])
                     clear_button = gr.Button(value=df.loc['limpiar', idioma])
                 with gr.Row():
-                    output_plots = gr.File(label=df.loc['descargar_graficas', idioma])
-                    output_geometry = gr.File(label=df.loc['descargar_geometria', idioma])
+                    output_gif = gr.File(label=df.loc['descargar_gif', idioma])
                 map_view = gr.HTML(
                     label=df.loc['mapa', idioma],
                     elem_id="output-map",
@@ -1681,7 +1275,7 @@ def build_interface() -> gr.Blocks:
                         latitude_column,
                         longitude_column,
                     ],
-                    outputs=[output_plots, output_geometry, map_view],
+                    outputs=[output_gif,map_view],
                 )
 
         return interface

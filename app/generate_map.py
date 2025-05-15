@@ -14,6 +14,11 @@ from shapely.geometry import shape
 from shapely.ops import unary_union
 from matplotlib.colors import LinearSegmentedColormap
 from branca.colormap import LinearColormap
+from collections import defaultdict
+from rasterio.merge import merge
+from PIL import Image, ImageDraw, ImageFont
+
+
 
 
 colors = [
@@ -27,7 +32,7 @@ colors = [
 custom_cmap = LinearSegmentedColormap.from_list("NDWI_cmap", colors, N=256)
 
 
-def generate_map_from_geojson(geojson_data: dict, image_paths: List[str]) -> str:
+def generate_map_from_geojson(geojson_data: dict, image_paths: List[str], gif_path, indexes) -> str:
     vmin = -0.6
     vmax = 0.25
     date_groups = {}
@@ -38,7 +43,7 @@ def generate_map_from_geojson(geojson_data: dict, image_paths: List[str]) -> str
     for tiff_file in image_paths:
         base_name = os.path.basename(tiff_file)
         parts = base_name.split("_")
-        date = f"{parts[1]}_{parts[2]}"  # Extrae la fecha de la imagen
+        date = f"{parts[1]}_{parts[2]}"  
         
         png_name = os.path.splitext(base_name)[0] + ".png"
         output_png_path = os.path.join(tempfile.gettempdir(), png_name)
@@ -94,37 +99,147 @@ def generate_map_from_geojson(geojson_data: dict, image_paths: List[str]) -> str
 
     #folium.GeoJson(geojson_data, name="Geometrías").add_to(m)
 
-    show_layer = True
-    for date, images in date_groups.items():
-        layer_group = folium.FeatureGroup(name=date, show=show_layer)
-        show_layer = False  # Desactiva las siguientes
+    _, image_bounds = next(iter(date_groups.values()))[0]
 
-        for image, image_bounds in images:
-            folium.raster_layers.ImageOverlay(image=image, bounds=image_bounds, opacity=1).add_to(layer_group)
-        layer_group.add_to(m)
-    color_scale = LinearColormap(
-        colors=[(0.5, 0.25, 0.0), (1.0, 0.0, 0.0), (1.0, 0.5, 0.0),
-                (1.0, 1.0, 0.0), (0.0, 1.0, 1.0), (0.0, 0.0, 1.0)],
-        vmin=vmin, vmax=vmax
+
+    gif_layer = folium.raster_layers.ImageOverlay(
+        image=gif_path,
+        bounds=image_bounds,
+        opacity=1,
+        name="Evolución temporal (GIF)",
+        interactive=True,
+        cross_origin=False
     )
+    gif_layer.add_to(m)
 
-    color_scale.add_to(m)
+    if(indexes!=["RGB"]):
+
+        color_scale = LinearColormap(
+            colors=[(0.5, 0.25, 0.0), (1.0, 0.0, 0.0), (1.0, 0.5, 0.0),
+                    (1.0, 1.0, 0.0), (0.0, 1.0, 1.0), (0.0, 0.0, 1.0)],
+            vmin=vmin, vmax=vmax
+        )
+
+        color_scale.add_to(m)
     folium.LayerControl().add_to(m)
     return m
 
+def merge_tifs_por_fecha(tif_paths):
+    """
+    Recibe una lista de imágenes TIFF, las agrupa por índice y fecha (año y mes en el nombre),
+    y las fusiona. Devuelve la lista de rutas a los TIFFs fusionados por índice y mes.
 
-def create_gif(image_paths: List[str]) -> str:
+    Args:
+        tif_paths (list): Lista de rutas a archivos .tif
+
+    Returns:
+        list: Lista de rutas a los TIFFs fusionados por índice y mes.
+    """
+    print(tif_paths)
+    grupos = defaultdict(list)
+    for path in tif_paths:
+        filename = os.path.basename(path)
+        parts = filename.split("_")
+        if len(parts) < 3:
+            continue 
+        indice = parts[0].upper()
+        anio = parts[1]
+        mes = parts[2]
+        clave = f"{indice}_{anio}_{mes}"
+        grupos[clave].append(path)
+
+    rutas_mergeadas = []
+    temp_dir = tempfile.mkdtemp()
+
+    for clave, archivos in grupos.items():
+        datasets = [rasterio.open(f) for f in archivos]
+        merged, output_transform = merge(datasets, method="last")
+
+        perfil = datasets[0].profile
+        perfil.update(
+            driver="GTiff",
+            height=merged.shape[1],
+            width=merged.shape[2],
+            transform=output_transform,
+            count=datasets[0].count,
+            dtype=merged.dtype,
+        )
+
+        output_path = os.path.join(temp_dir, f"{clave}.tif")
+        with rasterio.open(output_path, "w", **perfil) as dst:
+            dst.write(merged)
+
+        for ds in datasets:
+            ds.close()
+
+        rutas_mergeadas.append(output_path)
+
+    return rutas_mergeadas
+
+def merge_tifs_por_fecha(tif_paths):
+    """
+    Recibe una lista de imágenes TIFF, las agrupa por índice y fecha (año y mes en el nombre),
+    y las fusiona. Devuelve la lista de rutas a los TIFFs fusionados por índice y mes.
+
+    Args:
+        tif_paths (list): Lista de rutas a archivos .tif
+
+    Returns:
+        list: Lista de rutas a los TIFFs fusionados por índice y mes.
+    """
+    print(tif_paths)
+    grupos = defaultdict(list)
+    for path in tif_paths:
+        filename = os.path.basename(path)
+        parts = filename.split("_")
+        if len(parts) < 3:
+            continue   
+        indice = parts[0].upper()
+        anio = parts[1]
+        mes = parts[2]
+        clave = f"{indice}_{anio}_{mes}"
+        grupos[clave].append(path)
+
+    rutas_mergeadas = []
+    temp_dir = tempfile.mkdtemp()
+
+    for clave, archivos in grupos.items():
+        datasets = [rasterio.open(f) for f in archivos]
+        merged, output_transform = merge(datasets, method="last")
+
+        perfil = datasets[0].profile
+        perfil.update(
+            driver="GTiff",
+            height=merged.shape[1],
+            width=merged.shape[2],
+            transform=output_transform,
+            count=datasets[0].count,
+            dtype=merged.dtype,
+        )
+
+        output_path = os.path.join(temp_dir, f"{clave}.tif")
+        with rasterio.open(output_path, "w", **perfil) as dst:
+            dst.write(merged)
+
+        for ds in datasets:
+            ds.close()
+
+        rutas_mergeadas.append(output_path)
+
+    return rutas_mergeadas
+
+def crear_gif_no_rgb(image_paths: List[str]) -> str:
+    png_list=[]
     vmin = -0.6
     vmax = 0.25
     date_groups = {}
 
-    # Obtener CRS del GeoJSON (suponiendo que usa EPSG:4326 por defecto)
     geojson_crs = CRS.from_epsg(4326)
 
     for tiff_file in image_paths:
         base_name = os.path.basename(tiff_file)
         parts = base_name.split("_")
-        date = f"{parts[1]}_{parts[2]}"  # Extrae la fecha de la imagen
+        date = f"{parts[1]}_{parts[2]}"
         
         png_name = os.path.splitext(base_name)[0] + ".png"
         output_png_path = os.path.join(tempfile.gettempdir(), png_name)
@@ -161,9 +276,49 @@ def create_gif(image_paths: List[str]) -> str:
             data[white_pixels, 3] = 0
             processed_img = Image.fromarray(data, "RGBA")
             processed_img.save(output_png_path)
+            png_list.append(output_png_path)
 
         if date not in date_groups:
             date_groups[date] = []
         date_groups[date].append((output_png_path, image_bounds))  
 
-    return date_groups
+    font_size = 50  
+
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+    except Exception as e:
+        print("Error cargando la fuente:", e)
+        font = ImageFont.load_default()
+
+    frames = []
+    for img_path in png_list:
+        img = Image.open(img_path).convert("RGBA")
+        draw = ImageDraw.Draw(img)
+
+        texto = img_path.split("/")[-1].replace(".png", "")
+
+        text_bbox = draw.textbbox((0, 0), texto, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+
+        text_x = 20
+        text_y = 20
+        text_position = (text_x, text_y)
+
+        bg_padding = 30
+        bg_position = [
+            text_x - bg_padding, text_y - bg_padding,
+            text_x + text_width + bg_padding, text_y + text_height + bg_padding
+        ]
+        draw.rectangle(bg_position, fill=(0, 0, 0, 255))
+
+        draw.text(text_position, texto, font=font, fill="white")
+        
+        frames.append(img)
+
+    output_gif = os.path.join(tempfile.gettempdir(), "animation.gif")
+    frames[0].save(output_gif, save_all=True, append_images=frames[1:], duration=1000, loop=0)
+
+    return output_gif
